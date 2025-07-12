@@ -1,0 +1,133 @@
+#OPTIMIZATION OF PARAMETERS USING OPTUNA
+
+# ============================
+# Preparación de datos
+# ============================
+
+X = df_filtered.iloc[:, :-1]
+y = df_filtered.iloc[:, -1]
+mask = (~y.isna())
+
+X = X[mask]
+y = y[mask]
+
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dval = xgb.DMatrix(X_val, label=y_val)
+dtest = xgb.DMatrix(X_test, label=y_test)
+
+# ============================
+# Estudio Optuna
+# ============================
+def objective(trial):
+    n_estimators = trial.suggest_int("n_estimators", 500, 5000)
+    early_stopping_rounds = trial.suggest_int("early_stopping_rounds", 5, 10)
+    
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "random_state": 42,
+        "max_depth": trial.suggest_int("max_depth", 5, 9),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
+        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.7, 1.0),
+        "alpha": trial.suggest_float("alpha", 0.0, 1.0),
+        "lambda": trial.suggest_float("lambda", 0.0, 10.0),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2),
+    }
+
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=n_estimators,
+        evals=[(dval, "validation")],
+        early_stopping_rounds=early_stopping_rounds,
+        verbose_eval=False
+    )
+
+    preds = model.predict(dval)
+    r2 = r2_score(y_val, preds)
+    return r2
+
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=500, show_progress_bar=True)
+
+best_params = study.best_params
+print("Best Hyperparameters:", best_params)
+
+# ============================
+# Entrenar modelo final
+# ============================
+num_boost_round = best_params.pop("n_estimators")  # lo sacamos del dict
+early_stopping_rounds = best_params.pop("early_stopping_rounds")  # lo sacamos del dict
+
+final_params = {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "random_state": 42,
+    **best_params
+}
+
+xgb_model = xgb.train(
+    final_params,
+    dtrain,
+    num_boost_round=num_boost_round,
+    evals=[(dtrain, 'train'), (dval, 'validation')],
+    early_stopping_rounds=early_stopping_rounds,
+    verbose_eval=False
+)
+
+print("Model trained")
+
+# ============================
+# Validación cruzada final
+# ============================
+dtrain_all = xgb.DMatrix(X, label=y)
+cv_results = xgb.cv(
+    params=final_params,
+    dtrain=dtrain_all,
+    num_boost_round=num_boost_round,
+    nfold=5,
+    metrics={"rmse"},
+    early_stopping_rounds=early_stopping_rounds,
+    seed=42,
+    verbose_eval=False,
+    as_pandas=True
+)
+
+best_cv_rmse_std = cv_results["test-rmse-std"].iloc[-1]
+print("Kfold:", best_cv_rmse_std)
+
+# ============================
+# Métricas finales
+# ============================
+train_preds = xgb_model.predict(dtrain)
+val_preds = xgb_model.predict(dval)
+test_preds = xgb_model.predict(dtest)
+
+train_r2 = r2_score(y_train, train_preds)
+val_r2 = r2_score(y_val, val_preds)
+test_r2 = r2_score(y_test, test_preds)
+
+train_mse = mean_squared_error(y_train, train_preds)
+val_mse = mean_squared_error(y_val, val_preds)
+test_mse = mean_squared_error(y_test, test_preds)
+
+print(f"Train R²: {train_r2:.4f}, Train MSE: {train_mse:.4f}")
+print(f"Validation R²: {val_r2:.4f}, Validation MSE: {val_mse:.4f}")
+print(f"Test R²: {test_r2:.4f}, Test MSE: {test_mse:.4f}")
+
+
+# ============================
+# Feature Importance
+# ============================
+# Graficar importancia de las features
+booster = xgb_model  # `xgb.train` devuelve un booster directamente
+fig, ax = plt.subplots(figsize=(14, 10))
+xgb.plot_importance(booster, importance_type='gain', show_values=False, ax=ax)
+plt.title("Feature Importance (gain)")
+plt.tight_layout()
+plt.show()
